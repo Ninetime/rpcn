@@ -679,10 +679,27 @@ impl Database {
 				let com_id = servers_infos[0].to_owned();
 				let server = servers_infos[1].parse::<u16>();
 				let world = servers_infos[2].parse::<u32>();
-				let lobbies: Result<Vec<u64>, _> = if servers_infos[3].trim().is_empty() {
+				// Lobbies are separated by commas, a-b describes an inclusive range
+				let lobbies: Result<Vec<u64>, ()> = if servers_infos[3].trim().is_empty() {
 					Ok(Vec::new())
 				} else {
-					servers_infos[3].trim().split(',').map(|s| s.parse::<u64>()).collect()
+					servers_infos[3]
+						.trim()
+						.split(',')
+						.map(|s| {
+							let s = s.trim();
+							if let Some((first, last)) = s.split_once('-') {
+								let (first, last) = (first.trim().parse::<u64>().map_err(|_| ())?, last.trim().parse::<u64>().map_err(|_| ())?);
+								if first > last || last - first >= 4096 {
+									return Err(());
+								}
+								Ok((first..=last).collect())
+							} else {
+								s.parse::<u64>().map(|v| vec![v]).map_err(|_| ())
+							}
+						})
+						.collect::<Result<Vec<Vec<u64>>, ()>>()
+						.map(|v| v.concat())
 				};
 
 				if server.is_err() || world.is_err() || lobbies.is_err() {
@@ -693,6 +710,12 @@ impl Database {
 				Some((com_id, server.unwrap(), world.unwrap(), lobbies.unwrap()))
 			})
 			.collect();
+
+		// servers.cfg is authoritative for the lobbies of the titles it lists, so removed or moved lobbies don't linger
+		let config_com_ids: HashSet<&String> = config_servers.iter().map(|(com_id, _, _, _)| com_id).collect();
+		for com_id in config_com_ids {
+			let _ = self.conn.execute("DELETE FROM lobby WHERE communication_id = ?1", rusqlite::params![com_id]);
+		}
 
 		for (com_id, server, world, lobbies) in &config_servers {
 			let _ = self
@@ -1232,6 +1255,69 @@ impl Database {
 		}
 
 		Ok(list_worlds)
+	}
+	// Returns (server_id, lobby_id) for every lobby of the world, sorted by lobby id
+	pub fn get_lobby_list(&self, com_id: &ComId, world_id: u32) -> Result<Vec<(u16, u64)>, DbError> {
+		let com_id_str = com_id_to_string(com_id);
+		let mut stmt = self
+			.conn
+			.prepare("SELECT world.server_id, lobby.lobby_id FROM lobby JOIN world ON world.communication_id = lobby.communication_id AND world.world_id = lobby.world_id WHERE lobby.communication_id = ?1 AND lobby.world_id = ?2 ORDER BY lobby.lobby_id")
+			.map_err(|_| DbError::Internal)?;
+		let lobby_iter = stmt
+			.query_map(rusqlite::params![com_id_str, world_id], |r| Ok((r.get::<_, u16>(0)?, r.get::<_, i64>(1)? as u64)))
+			.map_err(|_| DbError::Internal)?;
+
+		lobby_iter.map(|l| l.map_err(|_| DbError::Internal)).collect()
+	}
+	// Lobby ids are unique per communication id so the new ones follow the highest existing id
+	pub fn create_default_lobbies(&self, com_id: &ComId, world_id: u32, count: u32) -> Result<(), DbError> {
+		let com_id_str = com_id_to_string(com_id);
+
+		let world_exists: i64 = self
+			.conn
+			.query_row(
+				"SELECT COUNT(*) FROM world WHERE communication_id = ?1 AND world_id = ?2",
+				rusqlite::params![com_id_str, world_id],
+				|r| r.get(0),
+			)
+			.map_err(|_| DbError::Internal)?;
+		if world_exists == 0 {
+			warn!("Attempted to create lobbies for a non-existing world({}:{})", &com_id_str, world_id);
+			return Err(DbError::Empty);
+		}
+
+		let max_lobby: Option<i64> = self
+			.conn
+			.query_row("SELECT MAX(lobby_id) FROM lobby WHERE communication_id = ?1", rusqlite::params![com_id_str], |r| r.get(0))
+			.map_err(|_| DbError::Internal)?;
+		let first = max_lobby.unwrap_or(0) + 1;
+
+		info!("Creating {} lobbies for world {}:{}", count, &com_id_str, world_id);
+		self.conn.execute_batch("BEGIN").map_err(|_| DbError::Internal)?;
+		for lobby_id in first..first + count as i64 {
+			if let Err(e) = self
+				.conn
+				.execute("INSERT INTO lobby (communication_id, world_id, lobby_id) VALUES (?1, ?2, ?3)", rusqlite::params![com_id_str, world_id, lobby_id])
+			{
+				error!("Unexpected error creating lobby({}:{}): {}", &com_id_str, lobby_id, e);
+				let _ = self.conn.execute_batch("ROLLBACK");
+				return Err(DbError::Internal);
+			}
+		}
+		self.conn.execute_batch("COMMIT").map_err(|_| DbError::Internal)
+	}
+	pub fn get_lobby_location(&self, com_id: &ComId, lobby_id: u64) -> Result<(u16, u32), DbError> {
+		let com_id_str = com_id_to_string(com_id);
+		self.conn
+			.query_row(
+				"SELECT world.server_id, world.world_id FROM lobby JOIN world ON world.communication_id = lobby.communication_id AND world.world_id = lobby.world_id WHERE lobby.communication_id = ?1 AND lobby.lobby_id = ?2",
+				rusqlite::params![com_id_str, lobby_id as i64],
+				|r| Ok((r.get(0)?, r.get(1)?)),
+			)
+			.map_err(|e| match e {
+				rusqlite::Error::QueryReturnedNoRows => DbError::Empty,
+				_ => DbError::Internal,
+			})
 	}
 	pub fn get_corresponding_server(&self, com_id: &ComId, world_id: u32, lobby_id: u64) -> Result<u16, rusqlite::Error> {
 		let com_id_str = com_id_to_string(com_id);

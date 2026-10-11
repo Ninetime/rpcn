@@ -25,6 +25,8 @@ mod game_tracker;
 use game_tracker::GameTracker;
 mod gui_room_manager;
 use gui_room_manager::GuiRoomManager;
+mod lobby_manager;
+use lobby_manager::LobbyManager;
 mod room_manager;
 use room_manager::RoomManager;
 mod score_cache;
@@ -39,13 +41,14 @@ use crate::server::database::Database;
 #[allow(non_snake_case, dead_code)]
 mod stream_extractor;
 
-const PROTOCOL_VERSION: u32 = 33;
+const PROTOCOL_VERSION: u32 = 34;
 
 pub struct Server {
 	config: Arc<RwLock<Config>>,
 	db_pool: r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
 	gui_room_manager: Arc<RwLock<GuiRoomManager>>,
 	room_manager: Arc<RwLock<RoomManager>>,
+	lobby_manager: Arc<RwLock<LobbyManager>>,
 	client_infos: Arc<RwLock<HashMap<i64, ClientSharedInfo>>>,
 	score_cache: Arc<ScoresCache>,
 	game_tracker: Arc<GameTracker>,
@@ -91,6 +94,7 @@ impl Server {
 
 		let gui_room_manager = Arc::new(RwLock::new(GuiRoomManager::new()));
 		let room_manager = Arc::new(RwLock::new(RoomManager::new()));
+		let lobby_manager = Arc::new(RwLock::new(LobbyManager::new()));
 		let client_infos = Arc::new(RwLock::new(HashMap::new()));
 		let game_tracker = Arc::new(GameTracker::new());
 		let cleanup_duty = Arc::new(RwLock::new(HashSet::new()));
@@ -100,6 +104,7 @@ impl Server {
 			db_pool,
 			gui_room_manager,
 			room_manager,
+			lobby_manager,
 			client_infos,
 			score_cache,
 			game_tracker,
@@ -214,7 +219,7 @@ impl Server {
 						let acceptor = acceptor.clone();
 						let config = self.config.clone();
 						let db_pool = self.db_pool.clone();
-						let shared = SharedData::new(self.gui_room_manager.clone(), self.room_manager.clone(), self.client_infos.clone(), self.score_cache.clone(), self.game_tracker.clone(), self.cleanup_duty.clone());
+						let shared = SharedData::new(self.gui_room_manager.clone(), self.room_manager.clone(), self.lobby_manager.clone(), self.client_infos.clone(), self.score_cache.clone(), self.game_tracker.clone(), self.cleanup_duty.clone());
 						let servinfo_vec = servinfo_vec.clone();
 						let term_watch = term_watch.clone();
 						let filecleaner_send = filecleaner_send.clone();
