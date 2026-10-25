@@ -1286,25 +1286,25 @@ impl Database {
 			return Err(DbError::Empty);
 		}
 
-		let max_lobby: Option<i64> = self
-			.conn
+		// The transaction rolls back when dropped so the pooled connection is never left inside of it
+		let tx = self.conn.unchecked_transaction().map_err(|_| DbError::Internal)?;
+
+		let max_lobby: Option<i64> = tx
 			.query_row("SELECT MAX(lobby_id) FROM lobby WHERE communication_id = ?1", rusqlite::params![com_id_str], |r| r.get(0))
 			.map_err(|_| DbError::Internal)?;
 		let first = max_lobby.unwrap_or(0) + 1;
 
 		info!("Creating {} lobbies for world {}:{}", count, &com_id_str, world_id);
-		self.conn.execute_batch("BEGIN").map_err(|_| DbError::Internal)?;
 		for lobby_id in first..first + count as i64 {
-			if let Err(e) = self
-				.conn
-				.execute("INSERT INTO lobby (communication_id, world_id, lobby_id) VALUES (?1, ?2, ?3)", rusqlite::params![com_id_str, world_id, lobby_id])
-			{
+			if let Err(e) = tx.execute(
+				"INSERT INTO lobby (communication_id, world_id, lobby_id) VALUES (?1, ?2, ?3)",
+				rusqlite::params![com_id_str, world_id, lobby_id],
+			) {
 				error!("Unexpected error creating lobby({}:{}): {}", &com_id_str, lobby_id, e);
-				let _ = self.conn.execute_batch("ROLLBACK");
 				return Err(DbError::Internal);
 			}
 		}
-		self.conn.execute_batch("COMMIT").map_err(|_| DbError::Internal)
+		tx.commit().map_err(|_| DbError::Internal)
 	}
 	pub fn get_lobby_location(&self, com_id: &ComId, lobby_id: u64) -> Result<(u16, u32), DbError> {
 		let com_id_str = com_id_to_string(com_id);

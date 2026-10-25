@@ -36,7 +36,9 @@ impl Client {
 			let config = self.config.read();
 			(config.is_create_missing(), config.get_default_lobbies())
 		};
-		if lobbies.is_empty() && create_missing && default_lobbies != 0 && db.create_default_lobbies(&com_id, req.world_id, default_lobbies).is_ok() {
+		if lobbies.is_empty() && create_missing && default_lobbies != 0 {
+			// Reads the list even if creation failed, another client may have created the lobbies concurrently
+			let _ = db.create_default_lobbies(&com_id, req.world_id, default_lobbies);
 			lobbies = match db.get_lobby_list(&com_id, req.world_id) {
 				Ok(lobbies) => lobbies,
 				Err(_) => return Ok(ErrorType::DbFail),
@@ -138,7 +140,11 @@ impl Client {
 		let (com_id, req) = self.get_com_and_pb::<SendLobbyMessageRequest>(data)?;
 		validate_chat_message(&req.msg)?;
 
-		let res = self.shared.lobby_manager.read().get_message_targets(&com_id, req.lobby_id, self.client_info.user_id, req.cast_type, &req.dst);
+		let res = self
+			.shared
+			.lobby_manager
+			.read()
+			.get_message_targets(&com_id, req.lobby_id, self.client_info.user_id, req.cast_type, &req.dst);
 		let targets = match res {
 			Err(e) => return Ok(e),
 			Ok(targets) => targets,
@@ -168,7 +174,11 @@ impl Client {
 		let (com_id, req) = self.get_com_and_pb::<SendLobbyInvitationRequest>(data)?;
 		validate_invitation(&req.target_session, &req.opt_data)?;
 
-		let res = self.shared.lobby_manager.read().get_message_targets(&com_id, req.lobby_id, self.client_info.user_id, req.cast_type, &req.dst);
+		let res = self
+			.shared
+			.lobby_manager
+			.read()
+			.get_message_targets(&com_id, req.lobby_id, self.client_info.user_id, req.cast_type, &req.dst);
 		let targets = match res {
 			Err(e) => return Ok(e),
 			Ok(targets) => targets,
